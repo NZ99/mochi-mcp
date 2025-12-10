@@ -1,0 +1,41 @@
+{
+    "name": "mochi-mcp",
+    "version": "0.1.0",
+    "description": "MCP server for Mochi.cards - enables AI agents to manage flashcards",
+    "type": "module",
+    "main": "dist/index.js",
+    "bin": {
+        "mochi-mcp": "dist/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsx src/index.ts",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:live": "MOCHI_LIVE_TEST=true vitest run",
+        "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+        "lint": "tsc --noEmit"
+    },
+    "keywords": [
+        "mcp",
+        "mochi",
+        "flashcards",
+        "spaced-repetition",
+        "ai"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.12.0",
+        "zod": "^3.25.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.1",
+        "tsx": "^4.19.2",
+        "typescript": "^5.7.2",
+        "vitest": "^2.1.8"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
