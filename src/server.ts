@@ -21,6 +21,68 @@ export function createServer(config: Config): McpServer {
     });
 
     // ==========================================================================
+    // Prompts
+    // ==========================================================================
+
+    server.prompt(
+        'mochi_guide',
+        'Detailed user guide for Mochi MCP tools and workflows',
+        async () => {
+            return {
+                messages: [
+                    {
+                        role: 'assistant',
+                        content: {
+                            type: 'text',
+                            text: `
+                                # Mochi MCP Server Guide
+
+                                This server manages your Mochi flashcards. Here are the key workflows:
+
+                                ## 1. Finding Cards
+                                - **Search**: Use \`search_cards\` to find cards by query, tags, or creation date.
+                                  - Returns rich results: id, deckId, name, question, answer, tags, createdAt, updatedAt.
+                                  - Also returns: totalFound, scannedCount, truncated, partial (for transparency).
+                                - **Date Filtering**: Use \`createdAfter\` / \`createdBefore\` with ISO 8601 UTC strings (e.g., \`2025-12-11T00:00:00.000Z\`).
+                                - **Find Deck**: Use \`find_deck_by_name\` when you know the deck name but not its ID.
+                                - **Pagination**: For large collections, use \`list_cards_page\` with explicit bookmark control.
+
+                                ## 2. Performance Notes
+                                - **Global search** scans at most **1000 cards**.
+                                - **Per-deck search** scans at most **5000 cards**.
+                                - If you need to scan more, use \`list_cards_page\` with pagination.
+                                - The \`truncated\` flag indicates if the scan cap was reached.
+                                - The \`partial\` flag indicates if a timeout occurred mid-scan.
+
+                                ## 3. Editing Cards (Two-Phase Commit)
+                                All updates require a safety check:
+                                1.  **Preview**: Call \`update_card_fields_preview\` (for distinct Q/A edits) or \`update_card_preview\` (for full content).
+                                2.  **Review**: The tool returns a DIFF and a TOKEN. Show this diff to the user.
+                                3.  **Confirm**: If the user approves, call \`apply_update_card\` with the token.
+
+                                ## 4. Tag Management
+                                - **Add Tags**: Use \`add_tags_preview\` to preview adding tags to multiple cards.
+                                - **Remove Tags**: Use \`remove_tags_preview\` to preview removing tags.
+                                - **Apply**: Call \`apply_tags_update\` with the token. Confirmation: \`"confirm tags"\`
+
+                                ## 5. Batch Updates
+                                To update multiple cards efficiently:
+                                1.  **Preview**: Call \`update_cards_batch_preview\` with a list of updates.
+                                2.  **Review**: This generates a single summary diff and ONE token.
+                                3.  **Confirm**: Call \`apply_update_cards_batch\` with the token to execute all updates sequentially.
+
+                                ## 6. Safety
+                                - **Timeouts**: Searches traversing the whole database are limited to 45s.
+                                - **Rate Limits**: Batch operations run sequentially to respect API limits.
+                            `.trim()
+                        }
+                    }
+                ]
+            };
+        }
+    );
+
+    // ==========================================================================
     // Read Tools
     // ==========================================================================
 
@@ -58,17 +120,100 @@ export function createServer(config: Config): McpServer {
     );
 
     server.tool(
+        'get_cards',
+        'Get content of multiple cards (bulk)',
+        { cardIds: z.array(z.string()).describe('List of Card IDs to retrieve') },
+        async (args) => {
+            const parsed = tools.GetCardsSchema.parse(args);
+            const result = await tools.handleGetCards(client, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
         'search_cards',
-        'Search cards in a specific deck. IMPORTANT: First call list_decks to get deck IDs, then call this with a deckId.',
+        'Search cards by content, tags, or date. Returns rich results with deckId, createdAt, updatedAt. Includes scannedCount and truncated flags.',
         {
             query: z.string().optional().describe('Text to search in card content'),
-            deckId: z.string().describe('Deck ID (required) - get from list_decks first'),
+            deckId: z.string().optional().describe('Deck ID (optional - searches all decks if omitted)'),
             tags: z.array(z.string()).optional().describe('Filter by tags (all must match)'),
+            createdAfter: z.string().optional().describe('Filter cards created on or after this date (ISO 8601 UTC format). For "today" or "yesterday", calculate and pass the date.'),
+            createdBefore: z.string().optional().describe('Filter cards created before this date (ISO 8601 UTC format)'),
             limit: z.number().optional().describe('Max results (default 20, max 50)'),
         },
         async (args) => {
             const parsed = tools.SearchCardsSchema.parse(args);
             const result = await tools.handleSearchCards(client, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'list_cards_page',
+        'Fetch a single page of cards with explicit pagination. Use for iterating through large collections.',
+        {
+            deckId: z.string().optional().describe('Deck ID (optional - lists from all decks if omitted)'),
+            bookmark: z.string().optional().describe('Pagination cursor from previous response'),
+            pageSize: z.number().optional().describe('Cards per page (default 50, max 100)'),
+        },
+        async (args) => {
+            const parsed = tools.ListCardsPageSchema.parse(args);
+            const result = await tools.handleListCardsPage(client, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'find_deck_by_name',
+        'Find decks by name (case-insensitive partial match). Useful when you know the deck name but not its ID.',
+        {
+            query: z.string().describe('Name or partial name to search for'),
+        },
+        async (args) => {
+            const parsed = tools.FindDeckByNameSchema.parse(args);
+            const result = await tools.handleFindDeckByName(client, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'add_tags_preview',
+        'Preview adding tags to one or more cards. Returns a token for apply_tags_update.',
+        {
+            cardIds: z.array(z.string()).describe('Card IDs to add tags to'),
+            tagsToAdd: z.array(z.string()).describe('Tags to add'),
+        },
+        async (args) => {
+            const parsed = tools.AddTagsPreviewSchema.parse(args);
+            const result = await tools.handleAddTagsPreview(client, config, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'remove_tags_preview',
+        'Preview removing tags from one or more cards. Returns a token for apply_tags_update.',
+        {
+            cardIds: z.array(z.string()).describe('Card IDs to remove tags from'),
+            tagsToRemove: z.array(z.string()).describe('Tags to remove'),
+        },
+        async (args) => {
+            const parsed = tools.RemoveTagsPreviewSchema.parse(args);
+            const result = await tools.handleRemoveTagsPreview(client, config, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'apply_tags_update',
+        'Apply tag changes after user confirms. Use with token from add_tags_preview or remove_tags_preview.',
+        {
+            token: z.string().describe('Token from add_tags_preview or remove_tags_preview'),
+            confirmation: z.string().describe('Must be exactly: "confirm tags"'),
+        },
+        async (args) => {
+            const parsed = tools.ApplyTagsUpdateSchema.parse(args);
+            const result = await tools.handleApplyTagsUpdate(client, parsed);
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }
     );
@@ -121,6 +266,53 @@ export function createServer(config: Config): McpServer {
         async (args) => {
             const parsed = tools.UpdateCardPreviewSchema.parse(args);
             const result = await tools.handleUpdateCardPreview(client, config, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'update_card_fields_preview',
+        'Preview changes to specific fields (Question, Answer, Tags). Reconstructs full markdown.',
+        {
+            cardId: z.string().describe('Card ID to update'),
+            question: z.string().optional().describe('New question text'),
+            answer: z.string().optional().describe('New answer text'),
+            tags: z.array(z.string()).optional().describe('New tags'),
+        },
+        async (args) => {
+            const parsed = tools.UpdateCardFieldsPreviewSchema.parse(args);
+            const result = await tools.handleUpdateCardFieldsPreview(client, config, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'update_cards_batch_preview',
+        'Preview updates for multiple cards at once.',
+        {
+            updates: z.array(z.object({
+                cardId: z.string(),
+                content: z.string(),
+                tags: z.array(z.string()).optional(),
+            })).describe('List of updates'),
+        },
+        async (args) => {
+            const parsed = tools.UpdateCardsBatchPreviewSchema.parse(args);
+            const result = await tools.handleUpdateCardsBatchPreview(client, config, parsed);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+    );
+
+    server.tool(
+        'apply_update_cards_batch',
+        'Apply a batch of card updates.',
+        {
+            token: z.string().describe('Token from update_cards_batch_preview'),
+            confirmation: z.string().describe('Must be exactly: "confirm batch update"'),
+        },
+        async (args) => {
+            const parsed = tools.ApplyUpdateCardsBatchSchema.parse(args);
+            const result = await tools.handleApplyUpdateCardsBatch(client, parsed);
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         }
     );

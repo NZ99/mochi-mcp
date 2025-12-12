@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { MochiClient } from '../mochi-client.js';
 import { Config, validateDeleteConfirmation } from '../config.js';
 import { createToken, consumeToken, generateDiff } from '../utils/index.js';
+import { parseCardContent, buildCardContent } from '../utils/markdown.js';
 
 // ============================================================================
 // Schemas
@@ -31,9 +32,36 @@ export const UpdateCardPreviewSchema = z.object({
     tags: z.array(z.string()).optional().describe('New tags (replaces existing)'),
 });
 
+export const UpdateCardFieldsPreviewSchema = z.object({
+    cardId: z.string().describe('Card ID to update'),
+    question: z.string().optional().describe('New question text'),
+    answer: z.string().optional().describe('New answer text'),
+    tags: z.array(z.string()).optional().describe('New tags'),
+});
+
 export const ApplyUpdateCardSchema = z.object({
     token: z.string().describe('Confirmation token from update_card_preview'),
     confirmation: z.string().describe('Must be exactly: "confirm update"'),
+});
+
+// Batch update
+export const UpdateCardsBatchPreviewSchema = z.object({
+    updates: z.array(z.object({
+        cardId: z.string(),
+        content: z.string(),
+        tags: z.array(z.string()).optional(),
+    })).describe('List of updates to apply'),
+});
+
+export const ApplyUpdateCardsBatchSchema = z.object({
+    token: z.string().describe('Confirmation token from update_cards_batch_preview'),
+    confirmation: z.string().describe('Must be exactly: "confirm batch update"'),
+});
+
+// Tag update
+export const ApplyTagsUpdateSchema = z.object({
+    token: z.string().describe('Token from add_tags_preview or remove_tags_preview'),
+    confirmation: z.string().describe('Must be exactly: "confirm tags"'),
 });
 
 // Card deletion
@@ -189,6 +217,61 @@ export async function handleUpdateCardPreview(
     };
 }
 
+export async function handleUpdateCardFieldsPreview(
+    client: MochiClient,
+    config: Config,
+    args: z.infer<typeof UpdateCardFieldsPreviewSchema>
+): Promise<{
+    original: string;
+    proposed: string;
+    diff: string;
+    hasChanges: boolean;
+    token: string;
+    expiresAt: string;
+    message: string;
+}> {
+    // Fetch current card
+    const card = await client.getCard(args.cardId);
+
+    // Parse current content
+    const current = parseCardContent(card.content);
+
+    // Determine new content
+    const newQuestion = args.question !== undefined ? args.question : current.question;
+    const newAnswer = args.answer !== undefined ? args.answer : current.answer;
+
+    // Determine new tags (if provided, otherwise undefined - but check logic)
+    // Args.tags optional. If undefined, we don't touch tags. 
+    // Wait, update_card expects logic: "If tags is not undefined, it replaces tags". 
+    // CreateToken takes tags.
+
+    const newContent = buildCardContent(newQuestion, newAnswer);
+
+    // Generate diff
+    const diffResult = generateDiff(card.content, newContent);
+
+    // Generate token - reuse update_card type because the apply logic is identical
+    const token = createToken('update_card', {
+        cardId: args.cardId,
+        content: newContent,
+        tags: args.tags,
+    }, config.tokenExpiryMins);
+
+    const expiresAt = new Date(Date.now() + config.tokenExpiryMins * 60 * 1000).toISOString();
+
+    return {
+        original: diffResult.original,
+        proposed: diffResult.proposed,
+        diff: diffResult.diff,
+        hasChanges: diffResult.hasChanges || (args.tags !== undefined),
+        token,
+        expiresAt,
+        message: (diffResult.hasChanges || args.tags)
+            ? `Review the changes above. To apply, user must type: "confirm update"`
+            : 'No changes detected between original and proposed content.',
+    };
+}
+
 export async function handleApplyUpdateCard(
     client: MochiClient,
     args: z.infer<typeof ApplyUpdateCardSchema>
@@ -320,5 +403,156 @@ export async function handleDeleteDeck(
     return {
         success: true,
         message: `Deck "${deck.name}" moved to trash. Cards inside are preserved but hidden.`,
+    };
+}
+
+export async function handleUpdateCardsBatchPreview(
+    client: MochiClient,
+    config: Config,
+    args: z.infer<typeof UpdateCardsBatchPreviewSchema>
+): Promise<{
+    preview: string;
+    token: string;
+    expiresAt: string;
+    message: string;
+}> {
+    // Process all updates to generate massive preview
+    // Fetch all current cards first (optimization: use concurrency)
+    const cardIds = args.updates.map(u => u.cardId);
+    // Ideally we would have a multi-get, but for now we iterate
+    const previews: string[] = [];
+
+    // We'll limit concurrency to avoid calling API too fast? But for now sequential is safer given rate limits mentioned by user.
+    for (const update of args.updates) {
+        const card = await client.getCard(update.cardId);
+        const { diff, hasChanges } = generateDiff(card.content, update.content);
+
+        previews.push(
+            `### Card ${update.cardId}${hasChanges ? '' : ' (No Content Changes)'}\n` +
+            `${diff}\n` +
+            (update.tags ? `**New Tags:** ${update.tags.join(', ')}\n` : '')
+        );
+    }
+
+    const preview = previews.join('\n\n---\n\n');
+
+    // Create single token for batch
+    const token = createToken('batch_update_card', {
+        updates: args.updates
+    }, config.tokenExpiryMins);
+
+    const expiresAt = new Date(Date.now() + config.tokenExpiryMins * 60 * 1000).toISOString();
+
+    return {
+        preview,
+        token,
+        expiresAt,
+        message: `Review the ${args.updates.length} updates above. To apply ALL, user must type: "confirm batch update"`,
+    };
+}
+
+export async function handleApplyUpdateCardsBatch(
+    client: MochiClient,
+    args: z.infer<typeof ApplyUpdateCardsBatchSchema>
+): Promise<{
+    success: boolean;
+    results: Array<{ cardId: string; success: boolean; error?: string }>;
+    summary: string;
+}> {
+    const operation = consumeToken(args.token);
+
+    if (!operation || operation.type !== 'batch_update_card') {
+        return {
+            success: false,
+            results: [],
+            summary: 'Invalid or expired token.',
+        };
+    }
+
+    if (args.confirmation.toLowerCase().trim() !== 'confirm batch update') {
+        return {
+            success: false,
+            results: [],
+            summary: 'Invalid confirmation text.',
+        };
+    }
+
+    const data = operation.data as { updates: Array<{ cardId: string; content: string; tags?: string[] }> };
+    const results: Array<{ cardId: string; success: boolean; error?: string }> = [];
+
+    // Execute sequentially to avoid rate limits
+    // Since we don't have atomic batch, we do best effort.
+    for (const update of data.updates) {
+        try {
+            await client.updateCard(update.cardId, {
+                content: update.content,
+                tags: update.tags // This replaces tags, as per existing API wrapper logic
+            });
+            results.push({ cardId: update.cardId, success: true });
+        } catch (error) {
+            results.push({ cardId: update.cardId, success: false, error: String(error) });
+        }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.length - successCount;
+
+    return {
+        success: failCount === 0,
+        results,
+        summary: `Batch complete. Success: ${successCount}, Failed: ${failCount}`,
+    };
+}
+
+// ============================================================================
+// Tag Update (Apply)
+// ============================================================================
+
+export async function handleApplyTagsUpdate(
+    client: MochiClient,
+    args: z.infer<typeof ApplyTagsUpdateSchema>
+): Promise<{
+    success: boolean;
+    results: Array<{ cardId: string; success: boolean; error?: string }>;
+    summary: string;
+}> {
+    const operation = consumeToken(args.token);
+
+    if (!operation || operation.type !== 'batch_tag_update') {
+        return {
+            success: false,
+            results: [],
+            summary: 'Invalid or expired token. Please call add_tags_preview or remove_tags_preview again.',
+        };
+    }
+
+    if (args.confirmation.toLowerCase().trim() !== 'confirm tags') {
+        return {
+            success: false,
+            results: [],
+            summary: 'Invalid confirmation. User must type exactly: "confirm tags"',
+        };
+    }
+
+    const data = operation.data as { updates: Array<{ cardId: string; tags: string[] }> };
+    const results: Array<{ cardId: string; success: boolean; error?: string }> = [];
+
+    // Execute sequentially to avoid rate limits
+    for (const update of data.updates) {
+        try {
+            await client.updateCard(update.cardId, { tags: update.tags });
+            results.push({ cardId: update.cardId, success: true });
+        } catch (error) {
+            results.push({ cardId: update.cardId, success: false, error: String(error) });
+        }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.length - successCount;
+
+    return {
+        success: failCount === 0,
+        results,
+        summary: `Tag update complete. Success: ${successCount}, Failed: ${failCount}`,
     };
 }

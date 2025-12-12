@@ -160,4 +160,28 @@ describe('handleSearchCards', () => {
         expect(result.totalFound).toBe(1);
         expect(result.cards[0].id).toBe('card1');
     });
+
+    it('filters by creation date', async () => {
+        const oldCard = { ...mockCard, id: 'old', 'created-at': { date: '2023-01-01T00:00:00Z' } };
+        const newCard = { ...mockCard, id: 'new', 'created-at': { date: '2025-01-01T00:00:00Z' } };
+        vi.mocked(mockClient.listCards).mockResolvedValue([oldCard, newCard]);
+
+        // Filter created after 2024
+        const resultAfter = await handleSearchCards(mockClient, {
+            deckId: 'deck1',
+            createdAfter: '2024-01-01',
+            limit: 20
+        });
+        expect(resultAfter.totalFound).toBe(1);
+        expect(resultAfter.cards[0].id).toBe('new');
+
+        // Filter created before 2024
+        const resultBefore = await handleSearchCards(mockClient, {
+            deckId: 'deck1',
+            createdBefore: '2024-01-01',
+            limit: 20
+        });
+        expect(resultBefore.totalFound).toBe(1);
+        expect(resultBefore.cards[0].id).toBe('old');
+    });
 });

@@ -53,7 +53,10 @@ Then ask Claude: "List my Mochi decks" or "Search for cards about gradients".
 | `list_decks` | List all decks |
 | `get_deck` | Get deck with card list |
 | `get_card` | Get full card content |
-| `search_cards` | Search by text or tags |
+| `get_cards` | Get multiple cards by ID |
+| `search_cards` | Search by text, tags, or date. Returns rich results (deckId, createdAt, etc.) |
+| `list_cards_page` | Paginated card listing with bookmark |
+| `find_deck_by_name` | Find decks by name (case-insensitive partial match) |
 
 ### Write Operations (Two-Phase Commit)
 | Tool | Description |
@@ -61,13 +64,30 @@ Then ask Claude: "List my Mochi decks" or "Search for cards about gradients".
 | `create_card_preview` | Preview new card → returns token |
 | `apply_create_card` | Apply creation with token |
 | `update_card_preview` | Preview edit with diff → returns token |
+| `update_card_fields_preview` | Preview Q/A edit → returns token |
 | `apply_update_card` | Apply update with token |
+| `update_cards_batch_preview` | Preview batch updates |
+| `apply_update_cards_batch` | Apply batch updates |
+
+### Tag Operations (Two-Phase)
+| Tool | Description |
+|------|-------------|
+| `add_tags_preview` | Preview adding tags to cards |
+| `remove_tags_preview` | Preview removing tags |
+| `apply_tags_update` | Apply tag changes with token |
 
 ### Delete Operations (Requires Confirmation)
 | Tool | Description |
 |------|-------------|
 | `delete_card` | Soft-delete (requires: "delete card \<id\>") |
 | `delete_deck` | Disabled by default |
+
+## Performance Notes
+
+- **Global search** scans at most **1000 cards**
+- **Per-deck search** scans at most **5000 cards**
+- Use `list_cards_page` with pagination for larger collections
+- Date filters use **UTC** (ISO 8601 format: `YYYY-MM-DDTHH:mm:ss.sssZ`)
 
 ## Configuration
 

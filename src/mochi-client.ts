@@ -40,6 +40,13 @@ export interface PaginatedResponse<T> {
     bookmark?: string;
 }
 
+export class MochiTimeoutError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'MochiTimeoutError';
+    }
+}
+
 export interface MochiError {
     errors: string[] | Record<string, string>;
 }
@@ -72,6 +79,8 @@ export class MochiClient {
         let bookmark: string | undefined;
         let prevBookmark: string | undefined;
         let isFirstRequest = true;
+        const startTime = Date.now();
+        const TIMEOUT_MS = 45000; // 45s hard limit
 
         do {
             // Delay between paginated requests to avoid rate limiting
@@ -93,6 +102,10 @@ export class MochiClient {
 
             // Stop if bookmark repeats (Mochi API quirk)
             if (bookmark === prevBookmark) break;
+
+            if (Date.now() - startTime > TIMEOUT_MS) {
+                throw new MochiTimeoutError(`Operation timed out after ${TIMEOUT_MS}ms. Retrieved ${allDecks.length} decks.`);
+            }
 
         } while (bookmark && allDecks.length < 1000); // Safety limit
 
@@ -130,17 +143,24 @@ export class MochiClient {
     // --------------------------------------------------------------------------
 
     async listCards(deckId?: string, limit: number = 100): Promise<MochiCard[]> {
+        // NOTE: The 'limit' argument here is ambiguous. In this client, we treat it as "Max items to retrieve".
+        // The API 'limit' parameter is "page size". We'll use a reasonable page size (e.g. 100) but stop when we hit our target.
+        const targetLimit = limit;
+        const pageSize = Math.min(limit, 100);
+
         const allCards: MochiCard[] = [];
         let bookmark: string | undefined;
         let prevBookmark: string | undefined;
         let isFirstRequest = true;
+        const startTime = Date.now();
+        const TIMEOUT_MS = 45000; // 45s hard limit
 
         do {
             // Delay between paginated requests to avoid rate limiting
             if (!isFirstRequest) await sleep(PAGINATION_DELAY_MS);
             isFirstRequest = false;
 
-            let url = `${this.baseUrl}/cards/?limit=${limit}`;
+            let url = `${this.baseUrl}/cards/?limit=${pageSize}`; // Use page size for API
             if (deckId) url += `&deck-id=${encodeURIComponent(deckId)}`;
             if (bookmark) url += `&bookmark=${encodeURIComponent(bookmark)}`;
 
@@ -156,9 +176,41 @@ export class MochiClient {
             // Stop if bookmark repeats (Mochi API quirk)
             if (bookmark === prevBookmark) break;
 
-        } while (bookmark && allCards.length < 5000); // Safety limit
+            if (Date.now() - startTime > TIMEOUT_MS) {
+                // Return partial if we have something, but warn/throw?
+                // For safety, throwing is better than silent truncation in a "list all" context, 
+                // BUT for "search" we might prefer best-effort. 
+                // MochiTimeoutError allows the caller to decide.
+                throw new MochiTimeoutError(`Operation timed out after ${TIMEOUT_MS}ms. Retrieved ${allCards.length} cards.`);
+            }
 
-        return allCards;
+        } while (bookmark && allCards.length < targetLimit && allCards.length < 5000);
+
+        // Trim to exact limit if we over-fetched
+        return allCards.slice(0, targetLimit);
+    }
+
+    /**
+     * Fetch a single page of cards with explicit pagination control.
+     * Unlike listCards, this does NOT auto-paginate.
+     */
+    async listCardsPage(options: {
+        deckId?: string;
+        bookmark?: string;
+        pageSize?: number;
+    }): Promise<{ cards: MochiCard[]; bookmark?: string }> {
+        const pageSize = options.pageSize || 50;
+
+        let url = `${this.baseUrl}/cards/?limit=${pageSize}`;
+        if (options.deckId) url += `&deck-id=${encodeURIComponent(options.deckId)}`;
+        if (options.bookmark) url += `&bookmark=${encodeURIComponent(options.bookmark)}`;
+
+        const response = await this.request<PaginatedResponse<MochiCard>>(url);
+
+        return {
+            cards: response.docs || [],
+            bookmark: response.bookmark,
+        };
     }
 
     async getCard(cardId: string): Promise<MochiCard> {

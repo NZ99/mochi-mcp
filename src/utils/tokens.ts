@@ -4,7 +4,7 @@
  */
 
 export interface PendingOperation {
-    type: 'create_card' | 'update_card';
+    type: 'create_card' | 'update_card' | 'batch_update_card' | 'batch_tag_update';
     data: Record<string, unknown>;
     createdAt: Date;
     expiresAt: Date;
